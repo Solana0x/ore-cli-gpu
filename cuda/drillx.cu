@@ -8,7 +8,7 @@
 #include "equix/src/solver_heap.h"
 #include "hashx/src/context.h"
 
-const int BATCH_SIZE = 16384; // Increase batch size
+const int BATCH_SIZE = 8192;  // Increase batch size for better parallelism
 
 #define CUDA_CHECK(call) \
     do { \
@@ -20,11 +20,11 @@ const int BATCH_SIZE = 16384; // Increase batch size
     } while (0)
 
 extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
-    hashx_ctx** ctxs;
-    uint64_t** hash_space;
+    hashx_ctx **ctxs;
+    uint64_t **hash_space;
 
-    CUDA_CHECK(cudaMalloc(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*)));
-    CUDA_CHECK(cudaMalloc(&hash_space, BATCH_SIZE * sizeof(uint64_t*)));
+    CUDA_CHECK(cudaMallocManaged(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*)));
+    CUDA_CHECK(cudaMallocManaged(&hash_space, BATCH_SIZE * sizeof(uint64_t*)));
 
     for (int i = 0; i < BATCH_SIZE; i++) {
         CUDA_CHECK(cudaMalloc(&hash_space[i], INDEX_SPACE * sizeof(uint64_t)));
@@ -32,12 +32,6 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
 
     uint8_t seed[40];
     memcpy(seed, challenge, 32);
-
-    // Create multiple CUDA streams for better utilization
-    cudaStream_t streams[4];
-    for (int i = 0; i < 4; ++i) {
-        CUDA_CHECK(cudaStreamCreate(&streams[i]));
-    }
 
     for (int i = 0; i < BATCH_SIZE; i++) {
         uint64_t nonce_offset = *((uint64_t*)nonce) + i;
@@ -49,26 +43,16 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
                 CUDA_CHECK(cudaFree(hash_space[j]));
             }
             CUDA_CHECK(cudaFree(ctxs));
-            for (int i = 0; i < 4; ++i) {
-                CUDA_CHECK(cudaStreamDestroy(streams[i]));
-            }
             return;
         }
     }
 
-    dim3 threadsPerBlock(1024);
+    dim3 threadsPerBlock(1024);  // Increase threads per block
     dim3 blocksPerGrid((BATCH_SIZE * INDEX_SPACE + threadsPerBlock.x - 1) / threadsPerBlock.x);
-
-    // Launch kernel in multiple streams
-    for (int i = 0; i < 4; ++i) {
-        do_hash_stage0i<<<blocksPerGrid/4, threadsPerBlock, 0, streams[i]>>>(ctxs, hash_space);
-    }
+    do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, hash_space);
     CUDA_CHECK(cudaGetLastError());
 
-    // Synchronize all streams
-    for (int i = 0; i < 4; ++i) {
-        CUDA_CHECK(cudaStreamSynchronize(streams[i]));
-    }
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     for (int i = 0; i < BATCH_SIZE; i++) {
         CUDA_CHECK(cudaMemcpy(out + i * INDEX_SPACE, hash_space[i], INDEX_SPACE * sizeof(uint64_t), cudaMemcpyDeviceToHost));
@@ -79,14 +63,9 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
         CUDA_CHECK(cudaFree(hash_space[i]));
     }
     CUDA_CHECK(cudaFree(ctxs));
-
-    // Destroy CUDA streams
-    for (int i = 0; i < 4; ++i) {
-        CUDA_CHECK(cudaStreamDestroy(streams[i]));
-    }
 }
 
-__global__ void do_hash_stage0i(hashx_ctx** ctxs, uint64_t** hash_space) {
+__global__ void do_hash_stage0i(hashx_ctx **ctxs, uint64_t **hash_space) {
     uint32_t item = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t batch_idx = item / INDEX_SPACE;
     uint32_t i = item % INDEX_SPACE;
@@ -113,22 +92,15 @@ extern "C" void solve_all_stages(uint64_t *hashes, uint8_t *out, uint32_t *sols,
 
     CUDA_CHECK(cudaMemcpy(d_hashes, hashes, num_sets * INDEX_SPACE * sizeof(uint64_t), cudaMemcpyHostToDevice));
 
-    int threadsPerBlock = 1024;
-    int blocksPerGrid = (num_sets + threadsPerBlock - 1) / threadsPerBlock;
-
-    // Create multiple streams for solve_all_stages as well
-    cudaStream_t stream;
-    CUDA_CHECK(cudaStreamCreate(&stream));
-
-    solve_all_stages_kernel<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(d_hashes, d_heaps, d_solutions, d_num_sols);
+    int threadsPerBlock = 1024;  // Increase threads per block
+    int blocksPerGrid = (num_sets * INDEX_SPACE + threadsPerBlock - 1) / threadsPerBlock;
+    solve_all_stages_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_hashes, d_heaps, d_solutions, d_num_sols);
     CUDA_CHECK(cudaGetLastError());
 
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     CUDA_CHECK(cudaMemcpy(h_solutions, d_solutions, num_sets * EQUIX_MAX_SOLS * sizeof(equix_solution), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(h_num_sols, d_num_sols, num_sets * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-
-    CUDA_CHECK(cudaStreamSynchronize(stream));
 
     for (int i = 0; i < num_sets; i++) {
         sols[i] = h_num_sols[i];
@@ -144,6 +116,4 @@ extern "C" void solve_all_stages(uint64_t *hashes, uint8_t *out, uint32_t *sols,
 
     CUDA_CHECK(cudaFreeHost(h_solutions));
     CUDA_CHECK(cudaFreeHost(h_num_sols));
-
-    CUDA_CHECK(cudaStreamDestroy(stream));
 }

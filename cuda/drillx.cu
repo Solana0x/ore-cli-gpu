@@ -23,11 +23,11 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     hashx_ctx** ctxs;
     uint64_t** hash_space;
 
-    CUDA_CHECK(cudaMallocHost(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*)));
-    CUDA_CHECK(cudaMallocHost(&hash_space, BATCH_SIZE * sizeof(uint64_t*)));
+    CUDA_CHECK(cudaMallocManaged(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*)));
+    CUDA_CHECK(cudaMallocManaged(&hash_space, BATCH_SIZE * sizeof(uint64_t*)));
 
     for (int i = 0; i < BATCH_SIZE; i++) {
-        CUDA_CHECK(cudaMalloc(&hash_space[i], INDEX_SPACE * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMallocManaged(&hash_space[i], INDEX_SPACE * sizeof(uint64_t)));
     }
 
     uint8_t seed[40];
@@ -46,14 +46,13 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
                 hashx_free(ctxs[j]);
                 CUDA_CHECK(cudaFree(hash_space[j]));
             }
-            CUDA_CHECK(cudaFreeHost(hash_space));
-            CUDA_CHECK(cudaFreeHost(ctxs));
+            CUDA_CHECK(cudaFree(ctxs));
             CUDA_CHECK(cudaStreamDestroy(stream));
             return;
         }
     }
 
-    dim3 threadsPerBlock(1024);
+    dim3 threadsPerBlock(1024);  // Increased for 4090 GPU
     dim3 blocksPerGrid((BATCH_SIZE * INDEX_SPACE + threadsPerBlock.x - 1) / threadsPerBlock.x);
 
     // Launch kernel with the created stream
@@ -73,8 +72,7 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
         hashx_free(ctxs[i]);
         CUDA_CHECK(cudaFree(hash_space[i]));
     }
-    CUDA_CHECK(cudaFreeHost(hash_space));
-    CUDA_CHECK(cudaFreeHost(ctxs));
+    CUDA_CHECK(cudaFree(ctxs));
 
     // Destroy the CUDA stream
     CUDA_CHECK(cudaStreamDestroy(stream));
@@ -95,10 +93,10 @@ extern "C" void solve_all_stages(uint64_t *hashes, uint8_t *out, uint32_t *sols,
     equix_solution *d_solutions;
     uint32_t *d_num_sols;
 
-    CUDA_CHECK(cudaMalloc(&d_hashes, num_sets * INDEX_SPACE * sizeof(uint64_t)));
-    CUDA_CHECK(cudaMalloc(&d_heaps, num_sets * sizeof(solver_heap)));
-    CUDA_CHECK(cudaMalloc(&d_solutions, num_sets * EQUIX_MAX_SOLS * sizeof(equix_solution)));
-    CUDA_CHECK(cudaMalloc(&d_num_sols, num_sets * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMallocManaged(&d_hashes, num_sets * INDEX_SPACE * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMallocManaged(&d_heaps, num_sets * sizeof(solver_heap)));
+    CUDA_CHECK(cudaMallocManaged(&d_solutions, num_sets * EQUIX_MAX_SOLS * sizeof(equix_solution)));
+    CUDA_CHECK(cudaMallocManaged(&d_num_sols, num_sets * sizeof(uint32_t)));
 
     equix_solution *h_solutions;
     uint32_t *h_num_sols;
@@ -107,7 +105,7 @@ extern "C" void solve_all_stages(uint64_t *hashes, uint8_t *out, uint32_t *sols,
 
     CUDA_CHECK(cudaMemcpy(d_hashes, hashes, num_sets * INDEX_SPACE * sizeof(uint64_t), cudaMemcpyHostToDevice));
 
-    int threadsPerBlock = 512;
+    int threadsPerBlock = 1024;  // Adjusted for 4090 GPU
     int blocksPerGrid = (num_sets + threadsPerBlock - 1) / threadsPerBlock;
 
     // Create CUDA stream for asynchronous operations

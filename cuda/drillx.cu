@@ -8,7 +8,7 @@
 #include "equix/src/solver_heap.h"
 #include "hashx/src/context.h"
 
-const int BATCH_SIZE = 8192;
+const int BATCH_SIZE = 4096;
 
 #define CUDA_CHECK(call) \
     do { \
@@ -94,7 +94,7 @@ extern "C" void solve_all_stages(uint64_t *hashes, uint8_t *out, uint32_t *sols,
 
     CUDA_CHECK(cudaMemcpy(d_hashes, hashes, num_sets * INDEX_SPACE * sizeof(uint64_t), cudaMemcpyHostToDevice));
 
-    int threadsPerBlock = 512; // Consistency with the hash function
+    int threadsPerBlock = 1024; // Consistency with the hash function
     int blocksPerGrid = (num_sets + threadsPerBlock - 1) / threadsPerBlock;
     solve_all_stages_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_hashes, d_heaps, d_solutions, d_num_sols);
     CUDA_CHECK(cudaGetLastError());

@@ -8,7 +8,7 @@
 #include "equix/src/solver_heap.h"
 #include "hashx/src/context.h"
 
-const int BATCH_SIZE = 8192;  // Increase batch size for better parallelism
+const int BATCH_SIZE = 8192;  // Adjust as necessary
 
 #define CUDA_CHECK(call) \
     do { \
@@ -20,6 +20,10 @@ const int BATCH_SIZE = 8192;  // Increase batch size for better parallelism
     } while (0)
 
 extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
+    // Set the device heap size to accommodate larger in-kernel allocations
+    size_t heap_size = 128 * 1024 * 1024;  // 128 MB, adjust as needed
+    CUDA_CHECK(cudaDeviceSetLimit(cudaLimitMallocHeapSize, heap_size));
+
     hashx_ctx **ctxs;
     uint64_t **hash_space;
 
@@ -47,7 +51,7 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
         }
     }
 
-    dim3 threadsPerBlock(1024);  // Increase threads per block
+    dim3 threadsPerBlock(1024);
     dim3 blocksPerGrid((BATCH_SIZE * INDEX_SPACE + threadsPerBlock.x - 1) / threadsPerBlock.x);
     do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, hash_space);
     CUDA_CHECK(cudaGetLastError());
@@ -92,7 +96,7 @@ extern "C" void solve_all_stages(uint64_t *hashes, uint8_t *out, uint32_t *sols,
 
     CUDA_CHECK(cudaMemcpy(d_hashes, hashes, num_sets * INDEX_SPACE * sizeof(uint64_t), cudaMemcpyHostToDevice));
 
-    int threadsPerBlock = 1024;  // Increase threads per block
+    int threadsPerBlock = 1024;
     int blocksPerGrid = (num_sets * INDEX_SPACE + threadsPerBlock - 1) / threadsPerBlock;
     solve_all_stages_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_hashes, d_heaps, d_solutions, d_num_sols);
     CUDA_CHECK(cudaGetLastError());

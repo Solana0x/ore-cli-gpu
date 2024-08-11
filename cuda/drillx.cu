@@ -22,25 +22,29 @@ const int BUFFER_SIZE = 2; // Double buffering
         } \
     } while (0)
 
-__global__ void do_hash_stage0i(hashx_ctx** ctxs, uint64_t** hash_space, int bufferIndex) {
+// Kernel for processing the hashing stage
+__global__ void do_hash_stage0i(hashx_ctx** ctxs, uint64_t* hash_space, int index_space_size) {
     extern __shared__ uint64_t shared_hashes[];
-    
-    uint32_t item = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t batch_idx = item / INDEX_SPACE;
-    uint32_t i = item % INDEX_SPACE;
 
-    if (batch_idx < BATCH_SIZE) {
+    uint32_t item = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (item < index_space_size) {
+        uint32_t batch_idx = item / index_space_size;
+        uint32_t i = item % index_space_size;
+
         // Perform the hashing operation and store the result in shared memory
         hash_stage0i(ctxs[batch_idx], &shared_hashes[threadIdx.x], i);
-        
+
+        __syncthreads();  // Ensure all threads have completed their operations
+
         // Copy results from shared memory to global memory
-        hash_space[bufferIndex][item] = shared_hashes[threadIdx.x];
+        hash_space[item] = shared_hashes[threadIdx.x];
     }
 }
 
 extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     hashx_ctx** ctxs;
-    uint64_t** hash_space[BUFFER_SIZE]; // Double buffering
+    uint64_t* hash_space[BUFFER_SIZE]; // Double buffering
     cudaStream_t streams[BUFFER_SIZE];
 
     CUDA_CHECK(cudaMallocHost(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*)));
@@ -63,6 +67,7 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
             CUDA_CHECK(cudaFreeHost(ctxs));
             for (int j = 0; j < BUFFER_SIZE; j++) {
                 CUDA_CHECK(cudaFree(hash_space[j]));
+                CUDA_CHECK(cudaStreamDestroy(streams[j]));
             }
             return;
         }
@@ -74,11 +79,12 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     // Persistent kernel launch
     for (int iter = 0; iter < 1000; ++iter) {
         int bufferIndex = iter % BUFFER_SIZE;
-        
-        do_hash_stage0i<<<blocksPerGrid, threadsPerBlock, THREADS_PER_BLOCK * sizeof(uint64_t), streams[bufferIndex]>>>(ctxs, hash_space[bufferIndex], bufferIndex);
-        
+
+        do_hash_stage0i<<<blocksPerGrid, threadsPerBlock, THREADS_PER_BLOCK * sizeof(uint64_t), streams[bufferIndex]>>>(ctxs, hash_space[bufferIndex], BATCH_SIZE * INDEX_SPACE);
+        CUDA_CHECK(cudaGetLastError());
+
         // Transfer the data to host memory asynchronously
-        CUDA_CHECK(cudaMemcpyAsync(out, hash_space[bufferIndex], BATCH_SIZE * INDEX_SPACE * sizeof(uint64_t), cudaMemcpyDeviceToHost, streams[bufferIndex]));
+        CUDA_CHECK(cudaMemcpyAsync(out + bufferIndex * BATCH_SIZE * INDEX_SPACE, hash_space[bufferIndex], BATCH_SIZE * INDEX_SPACE * sizeof(uint64_t), cudaMemcpyDeviceToHost, streams[bufferIndex]));
     }
 
     CUDA_CHECK(cudaDeviceSynchronize());

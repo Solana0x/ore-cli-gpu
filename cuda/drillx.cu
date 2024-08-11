@@ -9,7 +9,7 @@
 #include "hashx/src/context.h"
 
 const int BATCH_SIZE = 4096;
-const int GRID_SIZE_MULTIPLIER = 64; // base of the 4090
+const int THREADS_PER_BLOCK = 1024;
 
 #define CUDA_CHECK(call) \
     do { \
@@ -25,9 +25,8 @@ __global__ void do_hash_stage0i(hashx_ctx** ctxs, uint64_t** hash_space) {
     uint32_t batch_idx = item / INDEX_SPACE;
     uint32_t i = item % INDEX_SPACE;
     if (batch_idx < BATCH_SIZE) {
-        // Unroll loop for better performance
-        #pragma unroll
-        for (int j = 0; j < 4; ++j) { 
+        #pragma unroll 4
+        for (int j = 0; j < 4; ++j) {
             hash_stage0i(ctxs[batch_idx], hash_space[batch_idx], i);
         }
     }
@@ -62,10 +61,11 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
         }
     }
 
-    dim3 threadsPerBlock(1024);
-    dim3 blocksPerGrid((GRID_SIZE_MULTIPLIER * BATCH_SIZE * INDEX_SPACE + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    
-    // Launch kernel multiple times to keep GPU busy
+    // Updated Grid Configuration
+    dim3 threadsPerBlock(THREADS_PER_BLOCK);
+    // Adjust blocksPerGrid to be within the limits of the GPU
+    int blocksPerGrid = (BATCH_SIZE * INDEX_SPACE + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+
     for (int iter = 0; iter < 1000; ++iter) {
         do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, hash_space);
         CUDA_CHECK(cudaGetLastError());

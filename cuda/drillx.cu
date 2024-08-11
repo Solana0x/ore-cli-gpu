@@ -24,22 +24,15 @@ const int BUFFER_SIZE = 2; // Double buffering
 
 // Kernel for processing the hashing stage
 __global__ void do_hash_stage0i(hashx_ctx** ctxs, uint64_t* hash_space, int index_space_size) {
-    extern __shared__ uint64_t shared_hashes[];
-
     uint32_t item = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (item < index_space_size) {
-        uint32_t batch_idx = item / index_space_size;
-        uint32_t i = item % index_space_size;
+    if (item >= BATCH_SIZE * index_space_size) return; // Bounds check to prevent illegal memory access
 
-        // Perform the hashing operation and store the result in shared memory
-        hash_stage0i(ctxs[batch_idx], &shared_hashes[threadIdx.x], i);
+    uint32_t batch_idx = item / index_space_size;
+    uint32_t i = item % index_space_size;
 
-        __syncthreads();  // Ensure all threads have completed their operations
-
-        // Copy results from shared memory to global memory
-        hash_space[item] = shared_hashes[threadIdx.x];
-    }
+    // Perform the hashing operation and store the result in global memory
+    hash_stage0i(ctxs[batch_idx], &hash_space[item], i);
 }
 
 extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
@@ -80,7 +73,7 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     for (int iter = 0; iter < 1000; ++iter) {
         int bufferIndex = iter % BUFFER_SIZE;
 
-        do_hash_stage0i<<<blocksPerGrid, threadsPerBlock, THREADS_PER_BLOCK * sizeof(uint64_t), streams[bufferIndex]>>>(ctxs, hash_space[bufferIndex], BATCH_SIZE * INDEX_SPACE);
+        do_hash_stage0i<<<blocksPerGrid, threadsPerBlock, 0, streams[bufferIndex]>>>(ctxs, hash_space[bufferIndex], INDEX_SPACE);
         CUDA_CHECK(cudaGetLastError());
 
         // Transfer the data to host memory asynchronously

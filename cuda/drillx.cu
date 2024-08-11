@@ -11,6 +11,7 @@
 
 const int BATCH_SIZE = 4096;
 const int THREADS_PER_BLOCK = 1024;
+const int BUFFER_SIZE = 2; // Double buffering
 
 #define CUDA_CHECK(call) \
     do { \
@@ -21,25 +22,31 @@ const int THREADS_PER_BLOCK = 1024;
         } \
     } while (0)
 
-// Kernel for processing the hashing stage
-__global__ void do_hash_stage0i(hashx_ctx** ctxs, uint64_t** hash_space) {
+__global__ void do_hash_stage0i(hashx_ctx** ctxs, uint64_t** hash_space, int bufferIndex) {
+    extern __shared__ uint64_t shared_hashes[];
+    
     uint32_t item = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t batch_idx = item / INDEX_SPACE;
     uint32_t i = item % INDEX_SPACE;
+
     if (batch_idx < BATCH_SIZE) {
-        hash_stage0i(ctxs[batch_idx], hash_space[batch_idx], i);
+        // Perform the hashing operation and store the result in shared memory
+        hash_stage0i(ctxs[batch_idx], &shared_hashes[threadIdx.x], i);
+        
+        // Copy results from shared memory to global memory
+        hash_space[bufferIndex][item] = shared_hashes[threadIdx.x];
     }
 }
 
 extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     hashx_ctx** ctxs;
-    uint64_t** hash_space;
+    uint64_t** hash_space[BUFFER_SIZE]; // Double buffering
+    cudaStream_t streams[BUFFER_SIZE];
 
     CUDA_CHECK(cudaMallocHost(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*)));
-    CUDA_CHECK(cudaMallocHost(&hash_space, BATCH_SIZE * sizeof(uint64_t*)));
-
-    for (int i = 0; i < BATCH_SIZE; i++) {
-        CUDA_CHECK(cudaMalloc(&hash_space[i], INDEX_SPACE * sizeof(uint64_t)));
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        CUDA_CHECK(cudaMalloc(&hash_space[i], BATCH_SIZE * INDEX_SPACE * sizeof(uint64_t)));
+        CUDA_CHECK(cudaStreamCreate(&streams[i]));
     }
 
     uint8_t seed[40];
@@ -52,10 +59,11 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
         if (!ctxs[i] || !hashx_make(ctxs[i], seed, 40)) {
             for (int j = 0; j <= i; j++) {
                 hashx_free(ctxs[j]);
+            }
+            CUDA_CHECK(cudaFreeHost(ctxs));
+            for (int j = 0; j < BUFFER_SIZE; j++) {
                 CUDA_CHECK(cudaFree(hash_space[j]));
             }
-            CUDA_CHECK(cudaFreeHost(hash_space));
-            CUDA_CHECK(cudaFreeHost(ctxs));
             return;
         }
     }
@@ -63,25 +71,27 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     dim3 threadsPerBlock(THREADS_PER_BLOCK);
     int blocksPerGrid = (BATCH_SIZE * INDEX_SPACE + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
 
-    // Launch the kernel
-    do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, hash_space);
-    CUDA_CHECK(cudaGetLastError());
+    // Persistent kernel launch
+    for (int iter = 0; iter < 1000; ++iter) {
+        int bufferIndex = iter % BUFFER_SIZE;
+        
+        do_hash_stage0i<<<blocksPerGrid, threadsPerBlock, THREADS_PER_BLOCK * sizeof(uint64_t), streams[bufferIndex]>>>(ctxs, hash_space[bufferIndex], bufferIndex);
+        
+        // Transfer the data to host memory asynchronously
+        CUDA_CHECK(cudaMemcpyAsync(out, hash_space[bufferIndex], BATCH_SIZE * INDEX_SPACE * sizeof(uint64_t), cudaMemcpyDeviceToHost, streams[bufferIndex]));
+    }
 
-    // Ensure all GPU operations are complete before copying data back
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Copying the results back to the CPU synchronously
-    for (int i = 0; i < BATCH_SIZE; i++) {
-        CUDA_CHECK(cudaMemcpy(out + i * INDEX_SPACE, hash_space[i], INDEX_SPACE * sizeof(uint64_t), cudaMemcpyDeviceToHost));
-    }
-
-    // Free resources
     for (int i = 0; i < BATCH_SIZE; i++) {
         hashx_free(ctxs[i]);
-        CUDA_CHECK(cudaFree(hash_space[i]));
     }
-    CUDA_CHECK(cudaFreeHost(hash_space));
+
     CUDA_CHECK(cudaFreeHost(ctxs));
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        CUDA_CHECK(cudaFree(hash_space[i]));
+        CUDA_CHECK(cudaStreamDestroy(streams[i]));
+    }
 }
 
 extern "C" void solve_all_stages(uint64_t *hashes, uint8_t *out, uint32_t *sols, int num_sets) {
@@ -120,7 +130,6 @@ extern "C" void solve_all_stages(uint64_t *hashes, uint8_t *out, uint32_t *sols,
         }
     }
 
-    // Free resources
     CUDA_CHECK(cudaFree(d_hashes));
     CUDA_CHECK(cudaFree(d_heaps));
     CUDA_CHECK(cudaFree(d_solutions));

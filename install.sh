@@ -8,6 +8,7 @@ cd ore-cli-gpu || { echo "Directory ore-cli not found!"; exit 1; }
 
 # Install necessary dependencies
 sudo apt-get install -y pkg-config libssl-dev build-essential curl
+sudo apt-get install -y pkg-config
 
 sudo apt install nano -y
 sudo apt install screen -y

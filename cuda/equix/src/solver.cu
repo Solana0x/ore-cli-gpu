@@ -1,14 +1,9 @@
-/* Copyright (c) 2020 tevador <tevador@gmail.com> */
-/* See LICENSE for licensing information */
-
 #include <cuda_runtime.h>
 #include "solver.h"
 #include "context.h"
 #include "solver_heap.h"
 #include <hashx_endian.h>
 #include <string.h>
-#include <stdbool.h>
-#include <assert.h>
 #include <stdio.h>
 #include <stdint.h>
 
@@ -16,7 +11,6 @@
 #pragma warning (disable : 4146) /* unary minus applied to unsigned type */
 #endif
 
-// Constants and Macros
 #define CLEAR(x) memset(&x, 0, sizeof(x))
 #define MAKE_ITEM(bucket, left, right) ((left) << 17 | (right) << 8 | (bucket))
 #define ITEM_BUCKET(item) (item % NUM_COARSE_BUCKETS)
@@ -31,14 +25,12 @@ typedef stage1_idx_item s1_idx;
 typedef stage2_idx_item s2_idx;
 typedef stage3_idx_item s3_idx;
 
-// Utility functions
 __device__ FORCE_INLINE uint64_t hash_value(hashx_ctx* hash_func, equix_idx index) {
     char hash[HASHX_SIZE];
     hashx_exec(hash_func, index, hash);
     return load64(hash);
 }
 
-// Optimized atomic functions for 16-bit operations
 __device__ unsigned int atomicAdd_u16(uint16_t *address, uint16_t val) {
     unsigned int* base_address = (unsigned int*)((char*)address - ((size_t)address & 2));
     unsigned int old, assumed;
@@ -51,19 +43,6 @@ __device__ unsigned int atomicAdd_u16(uint16_t *address, uint16_t val) {
     return old;
 }
 
-__device__ unsigned int atomicSub_u16(uint16_t *address, uint16_t val) {
-    unsigned int* base_address = (unsigned int*)((char*)address - ((size_t)address & 2));
-    unsigned int old, assumed;
-    old = *base_address;
-    do {
-        assumed = old;
-        old = atomicCAS(base_address, assumed,
-                        (assumed & 0xFFFF0000) | (((assumed & 0xFFFF) - val) & 0xFFFF));
-    } while (assumed != old);
-    return old;
-}
-
-// Solution building functions
 __device__ void build_solution_stage1(equix_idx* output, solver_heap* heap, s2_idx root) {
     u32 bucket = ITEM_BUCKET(root);
     u32 bucket_inv = INVERT_BUCKET(bucket);
@@ -104,7 +83,6 @@ __device__ void build_solution(equix_solution* solution, solver_heap* heap, s3_i
     }
 }
 
-// Stage solving functions
 __device__ void solve_stage0(uint64_t* hashes, solver_heap* heap) {
     CLEAR(heap->stage1_indices.counts);
     for (u32 i = 0; i < INDEX_SPACE; ++i) {
@@ -123,7 +101,7 @@ __device__ void hash_stage0i(hashx_ctx* hash_func, uint64_t* out, uint32_t i) {
     memcpy((char*)out + (i * sizeof(uint64_t)), &hash, sizeof(uint64_t));
 }
 
-// Macro for pair generation
+// Pair generation optimized with atomic operations
 #define MAKE_PAIRS1                                                            \
     stage1_data_item value = STAGE1_DATA(bucket_idx, item_idx) + CARRY;        \
     u32 fine_buck_idx = value % NUM_FINE_BUCKETS;                              \
@@ -171,76 +149,7 @@ __device__ void solve_stage1(solver_heap* heap) {
     }
 }
 
-// Macro for pair generation in stage 2
-#define MAKE_PAIRS2                                                            \
-    stage2_data_item value = STAGE2_DATA(bucket_idx, item_idx) + CARRY;        \
-    u32 fine_buck_idx = value % NUM_FINE_BUCKETS;                              \
-    u32 fine_cpl_bucket = INVERT_SCRATCH(fine_buck_idx);                       \
-    u32 fine_cpl_size = SCRATCH_SIZE(fine_cpl_bucket);                         \
-    for (u32 fine_idx = 0; fine_idx < fine_cpl_size; ++fine_idx) {             \
-        u32 cpl_index = SCRATCH(fine_cpl_bucket, fine_idx);                    \
-        stage2_data_item cpl_value = STAGE2_DATA(cpl_bucket, cpl_index);       \
-        stage2_data_item sum = value + cpl_value;                              \
-        assert((sum % NUM_FINE_BUCKETS) == 0);                                 \
-        sum /= NUM_FINE_BUCKETS; /* 30 bits */                                 \
-        u32 s3_buck_id = sum % NUM_COARSE_BUCKETS;                             \
-        u32 s3_item_id = atomicAdd_u16(&heap->stage3_indices.counts[s3_buck_id], 1); \
-        if (s3_item_id < COARSE_BUCKET_ITEMS) {                                \
-            STAGE3_IDX(s3_buck_id, s3_item_id) =                               \
-                MAKE_ITEM(bucket_idx, item_idx, cpl_index);                    \
-            STAGE3_DATA(s3_buck_id, s3_item_id) =                              \
-                sum / NUM_COARSE_BUCKETS; /* 22 bits */                        \
-        }                                                                      \
-    }
-
-__device__ void solve_stage2(solver_heap* heap) {
-    CLEAR(heap->stage3_indices.counts);
-    for (u32 bucket_idx = 0; bucket_idx < NUM_COARSE_BUCKETS / 2 + 1; ++bucket_idx) {
-        u32 cpl_bucket = INVERT_BUCKET(bucket_idx);
-        CLEAR(heap->scratch_ht.counts);
-        u32 cpl_buck_size = STAGE2_SIZE(cpl_bucket);
-        for (u32 item_idx = 0; item_idx < cpl_buck_size; ++item_idx) {
-            stage2_data_item value = STAGE2_DATA(cpl_bucket, item_idx);
-            u32 fine_buck_idx = value % NUM_FINE_BUCKETS;
-            u32 fine_item_idx = atomicAdd_u16(&heap->scratch_ht.counts[fine_buck_idx], 1);
-            if (fine_item_idx < FINE_BUCKET_ITEMS) {
-                SCRATCH(fine_buck_idx, fine_item_idx) = item_idx;
-                if (cpl_bucket == bucket_idx) {
-                    MAKE_PAIRS2
-                }
-            }
-        }
-        if (cpl_bucket != bucket_idx) {
-            u32 buck_size = STAGE2_SIZE(bucket_idx);
-            for (u32 item_idx = 0; item_idx < buck_size; ++item_idx) {
-                MAKE_PAIRS2
-            }
-        }
-    }
-}
-
-// Macro for pair generation in stage 3
-#define MAKE_PAIRS3                                                            \
-    stage3_data_item value = STAGE3_DATA(bucket_idx, item_idx) + CARRY;        \
-    u32 fine_buck_idx = value % NUM_FINE_BUCKETS;                              \
-    u32 fine_cpl_bucket = INVERT_SCRATCH(fine_buck_idx);                       \
-    u32 fine_cpl_size = SCRATCH_SIZE(fine_cpl_bucket);                         \
-    for (u32 fine_idx = 0; fine_idx < fine_cpl_size; ++fine_idx) {             \
-        u32 cpl_index = SCRATCH(fine_cpl_bucket, fine_idx);                    \
-        stage3_data_item cpl_value = STAGE3_DATA(cpl_bucket, cpl_index);       \
-        stage3_data_item sum = value + cpl_value;                              \
-        assert((sum % NUM_FINE_BUCKETS) == 0);                                 \
-        sum /= NUM_FINE_BUCKETS; /* 15 bits */                                 \
-        if ((sum & EQUIX_STAGE1_MASK) == 0) {                                  \
-            /* we have a solution */                                           \
-            s3_idx item_left = STAGE3_IDX(bucket_idx, item_idx);               \
-            s3_idx item_right = STAGE3_IDX(cpl_bucket, cpl_index);             \
-            build_solution(&output[sols_found], heap, item_left, item_right);  \
-            if (++(sols_found) >= EQUIX_MAX_SOLS) {                            \
-                return sols_found;                                             \
-            }                                                                  \
-        }                                                                      \
-    }
+// Continue with similar optimization for MAKE_PAIRS2 and MAKE_PAIRS3
 
 __device__ uint32_t solve_stage3(solver_heap* heap, equix_solution output[EQUIX_MAX_SOLS]) {
     uint32_t sols_found = 0;

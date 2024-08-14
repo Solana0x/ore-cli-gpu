@@ -8,7 +8,7 @@
 #include "equix/src/solver_heap.h"
 #include "hashx/src/context.h"
 
-const int BATCH_SIZE = 4096;
+const int BATCH_SIZE = 8192; // Increased batch size
 
 #define CUDA_CHECK(call) \
     do { \
@@ -19,17 +19,31 @@ const int BATCH_SIZE = 4096;
         } \
     } while (0)
 
-extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
-    hashx_ctx** ctxs;
+// Memory pool struct to handle memory more efficiently
+struct MemoryPool {
     uint64_t** hash_space;
+    hashx_ctx** ctxs;
 
-    // Use cudaHostAlloc to enable direct access from the GPU (zero-copy)
-    CUDA_CHECK(cudaHostAlloc(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*), cudaHostAllocMapped));
-    CUDA_CHECK(cudaHostAlloc(&hash_space, BATCH_SIZE * sizeof(uint64_t*), cudaHostAllocMapped));
-
-    for (int i = 0; i < BATCH_SIZE; i++) {
-        CUDA_CHECK(cudaMalloc(&hash_space[i], INDEX_SPACE * sizeof(uint64_t)));
+    MemoryPool(int batchSize) {
+        CUDA_CHECK(cudaHostAlloc(&ctxs, batchSize * sizeof(hashx_ctx*), cudaHostAllocMapped));
+        CUDA_CHECK(cudaHostAlloc(&hash_space, batchSize * sizeof(uint64_t*), cudaHostAllocMapped));
+        for (int i = 0; i < batchSize; i++) {
+            CUDA_CHECK(cudaMalloc(&hash_space[i], INDEX_SPACE * sizeof(uint64_t)));
+        }
     }
+
+    ~MemoryPool() {
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            CUDA_CHECK(cudaFree(hash_space[i]));
+        }
+        CUDA_CHECK(cudaFreeHost(hash_space));
+        CUDA_CHECK(cudaFreeHost(ctxs));
+    }
+};
+
+extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
+    // Create a memory pool instance to handle memory allocation
+    MemoryPool memPool(BATCH_SIZE);
 
     uint8_t seed[40];
     memcpy(seed, challenge, 32);
@@ -37,38 +51,31 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     for (int i = 0; i < BATCH_SIZE; i++) {
         uint64_t nonce_offset = *((uint64_t*)nonce) + i;
         memcpy(seed + 32, &nonce_offset, 8);
-        ctxs[i] = hashx_alloc(HASHX_INTERPRETED);
-        if (!ctxs[i] || !hashx_make(ctxs[i], seed, 40)) {
-            for (int j = 0; j <= i; j++) {
-                hashx_free(ctxs[j]);
-                CUDA_CHECK(cudaFree(hash_space[j]));
-            }
-            CUDA_CHECK(cudaFreeHost(hash_space));
-            CUDA_CHECK(cudaFreeHost(ctxs));
+        memPool.ctxs[i] = hashx_alloc(HASHX_INTERPRETED);
+        if (!memPool.ctxs[i] || !hashx_make(memPool.ctxs[i], seed, 40)) {
             return;
         }
     }
 
-    // Increased the number of threads per block to utilize full GPU capacity
     dim3 threadsPerBlock(1024);
     dim3 blocksPerGrid((BATCH_SIZE * INDEX_SPACE + threadsPerBlock.x - 1) / threadsPerBlock.x);
 
-    do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, hash_space);
+    // Using CUDA streams for overlapping computation and memory transfers
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+
+    do_hash_stage0i<<<blocksPerGrid, threadsPerBlock, 0, stream>>>(memPool.ctxs, memPool.hash_space);
     CUDA_CHECK(cudaGetLastError());
 
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
+    // Efficient memory copying with streams
     for (int i = 0; i < BATCH_SIZE; i++) {
-        CUDA_CHECK(cudaMemcpy(out + i * INDEX_SPACE, hash_space[i], INDEX_SPACE * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(out + i * INDEX_SPACE, memPool.hash_space[i], INDEX_SPACE * sizeof(uint64_t), cudaMemcpyDeviceToHost, stream));
     }
 
-    for (int i = 0; i < BATCH_SIZE; i++) {
-        hashx_free(ctxs[i]);
-        CUDA_CHECK(cudaFree(hash_space[i]));
-    }
-
-    CUDA_CHECK(cudaFreeHost(hash_space));
-    CUDA_CHECK(cudaFreeHost(ctxs));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaStreamDestroy(stream));
 }
 
 __global__ void do_hash_stage0i(hashx_ctx** ctxs, uint64_t** hash_space) {

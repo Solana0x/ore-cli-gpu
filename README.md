@@ -12,4 +12,4 @@ cargo build --release --features gpu
 
 ## Note
 
-This is an unoptimized cuda version of ore-cli and is worse than cpu.
+Building most optimized cuda version of ore-cli for public usage

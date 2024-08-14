@@ -21,7 +21,7 @@ use crate::{
     Miner,
 };
 
-#[cfg(feature = "gpu")]
+//#[cfg(feature = "gpu")]
 extern "C" {
     pub static BATCH_SIZE: u32;
     pub fn hash(challenge: *const u8, nonce: *const u8, out: *mut u64);
@@ -54,7 +54,7 @@ impl Miner {
 
             // Run drillx
             let config = get_config(&self.rpc_client).await;
-            let solution = Self::find_hash_par(
+            let solution = Self::find_hash_par_gpu(
                 proof,
                 cutoff_time,
                 args.threads,
@@ -81,7 +81,7 @@ impl Miner {
         }
     }
 
-    #[cfg(not(feature = "gpu"))]
+    //#[cfg(not(feature = "gpu"))]
     async fn find_hash_par(
         proof: Proof,
         cutoff_time: u64,
@@ -89,6 +89,7 @@ impl Miner {
         min_difficulty: u32,
     ) -> Solution {
         // Dispatch job to each thread
+        use drillx::equix;
         let progress_bar = Arc::new(spinner::new_progress_bar());
         progress_bar.set_message("Mining...");
         let handles: Vec<_> = (0..threads)
@@ -168,8 +169,8 @@ impl Miner {
         Solution::new(best_hash.d, best_nonce.to_le_bytes())
     }
 
-    #[cfg(feature = "gpu")]
-    async fn find_hash_par(
+    //#[cfg(feature = "gpu")]
+    async fn find_hash_par_gpu(
         proof: Proof,
         cutoff_time: u64,
         threads: u64,

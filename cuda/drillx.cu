@@ -23,8 +23,9 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
     hashx_ctx** ctxs;
     uint64_t** hash_space;
 
-    CUDA_CHECK(cudaMallocHost(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*)));
-    CUDA_CHECK(cudaMallocHost(&hash_space, BATCH_SIZE * sizeof(uint64_t*)));
+    // Use cudaHostAlloc to enable direct access from the GPU (zero-copy)
+    CUDA_CHECK(cudaHostAlloc(&ctxs, BATCH_SIZE * sizeof(hashx_ctx*), cudaHostAllocMapped));
+    CUDA_CHECK(cudaHostAlloc(&hash_space, BATCH_SIZE * sizeof(uint64_t*), cudaHostAllocMapped));
 
     for (int i = 0; i < BATCH_SIZE; i++) {
         CUDA_CHECK(cudaMalloc(&hash_space[i], INDEX_SPACE * sizeof(uint64_t)));
@@ -48,12 +49,14 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
         }
     }
 
+    // Increased the number of threads per block to utilize full GPU capacity
     dim3 threadsPerBlock(1024);
-    dim3 blocksPerGrid((65536 * BATCH_SIZE + threadsPerBlock.x - 1) / threadsPerBlock.x);
-    do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, hash_space);
-    CUDA_CHECK(cudaGetLastError()); // Check for launch errors
+    dim3 blocksPerGrid((BATCH_SIZE * INDEX_SPACE + threadsPerBlock.x - 1) / threadsPerBlock.x);
 
-    CUDA_CHECK(cudaDeviceSynchronize()); // Ensure all kernels are finished
+    do_hash_stage0i<<<blocksPerGrid, threadsPerBlock>>>(ctxs, hash_space);
+    CUDA_CHECK(cudaGetLastError());
+
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     for (int i = 0; i < BATCH_SIZE; i++) {
         CUDA_CHECK(cudaMemcpy(out + i * INDEX_SPACE, hash_space[i], INDEX_SPACE * sizeof(uint64_t), cudaMemcpyDeviceToHost));
@@ -63,15 +66,16 @@ extern "C" void hash(uint8_t *challenge, uint8_t *nonce, uint64_t *out) {
         hashx_free(ctxs[i]);
         CUDA_CHECK(cudaFree(hash_space[i]));
     }
+
     CUDA_CHECK(cudaFreeHost(hash_space));
     CUDA_CHECK(cudaFreeHost(ctxs));
 }
 
 __global__ void do_hash_stage0i(hashx_ctx** ctxs, uint64_t** hash_space) {
     uint32_t item = blockIdx.x * blockDim.x + threadIdx.x;
-    uint32_t batch_idx = item / INDEX_SPACE;
-    uint32_t i = item % INDEX_SPACE;
-    if (batch_idx < BATCH_SIZE) {
+    if (item < BATCH_SIZE * INDEX_SPACE) {
+        uint32_t batch_idx = item / INDEX_SPACE;
+        uint32_t i = item % INDEX_SPACE;
         hash_stage0i(ctxs[batch_idx], hash_space[batch_idx], i);
     }
 }
@@ -94,12 +98,13 @@ extern "C" void solve_all_stages(uint64_t *hashes, uint8_t *out, uint32_t *sols,
 
     CUDA_CHECK(cudaMemcpy(d_hashes, hashes, num_sets * INDEX_SPACE * sizeof(uint64_t), cudaMemcpyHostToDevice));
 
-    int threadsPerBlock = 512; // Consistency with the hash function
+    int threadsPerBlock = 512;
     int blocksPerGrid = (num_sets + threadsPerBlock - 1) / threadsPerBlock;
+
     solve_all_stages_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_hashes, d_heaps, d_solutions, d_num_sols);
     CUDA_CHECK(cudaGetLastError());
 
-    CUDA_CHECK(cudaDeviceSynchronize()); // Ensure all kernels are finished
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     CUDA_CHECK(cudaMemcpy(h_solutions, d_solutions, num_sets * EQUIX_MAX_SOLS * sizeof(equix_solution), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(h_num_sols, d_num_sols, num_sets * sizeof(uint32_t), cudaMemcpyDeviceToHost));

@@ -23,6 +23,7 @@ chrono = "0.4.38"
 clap = { version = "4.4.12", features = ["derive"] }
 colored = "2.0"
 drillx = { path = "drillx/drillx" }
+equix = { path = "cuda/equix" }
 futures = "0.3.30"
 num_cpus = "1.16.0"
 ore-api = "2.1.0"
@@ -50,3 +51,4 @@ cc = { version = "1.0", optional = true }
 # ore-api = { path = "../ore/api" }
 # ore-utils = { path = "../ore/utils" }
 drillx = { path = "drillx/drillx" }
+equix = { path = "cuda/equix" }

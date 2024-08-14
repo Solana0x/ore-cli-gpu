@@ -1,10 +1,10 @@
 #!/bin/bash
 # Update and upgrade the system
 sudo apt update && sudo apt upgrade -y
-git clone https://github.com/Solana0x/ore-cli-gpu
+# git clone https://github.com/Solana0x/ore-cli-gpu
 
-# Change to the ore-cli directory
-cd ore-cli-gpu || { echo "Directory ore-cli not found!"; exit 1; }
+# # Change to the ore-cli directory
+# cd ore-cli-gpu || { echo "Directory ore-cli not found!"; exit 1; }
 
 # Install necessary dependencies
 sudo apt-get install -y pkg-config libssl-dev build-essential curl

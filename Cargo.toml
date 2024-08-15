@@ -22,7 +22,7 @@ cached = "0.46.1"
 chrono = "0.4.38"
 clap = { version = "4.4.12", features = ["derive"] }
 colored = "2.0"
-drillx = { path = "drillx/drillx" }
+drillx = { git = "https://github.com/Solana0x/drillx.git", branch = "main" }
 equix = "0.1.6"
 futures = "0.3.30"
 num_cpus = "1.16.0"
@@ -50,4 +50,4 @@ cc = { version = "1.0", optional = true }
 [patch.crates-io]
 # ore-api = { path = "../ore/api" }
 # ore-utils = { path = "../ore/utils" }
-drillx = { path = "drillx/drillx" }
+# drillx = { path = "drillx/drillx" }
